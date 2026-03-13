@@ -9,20 +9,35 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.v1 import auth, chat
+from app.core.config import get_settings
 from app.core.database import close_db, close_redis, get_redis, init_db
+from app.repositories.chat_history_repository import (
+    MemoryChatHistoryRepository,
+    MongoChatHistoryRepository,
+)
 from app.services.sql_worker import run_sql_worker
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+settings = get_settings()
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """앱 시작 시 DB/Redis 초기화, SQL Worker 백그라운드 시작. 종료 시 정리."""
+    """앱 시작 시 DB/Redis/MongoDB 초기화, SQL Worker, chat_repo 설정. 종료 시 정리."""
     # Startup
     await init_db()
     redis = await get_redis()
     worker_task = asyncio.create_task(run_sql_worker(redis))
+
+    # ChatHistory Repository (MongoDB 또는 Memory Mock)
+    if settings.MOCK_MONGO:
+        app.state.chat_repo = MemoryChatHistoryRepository()
+        logger.info("Using MemoryChatHistoryRepository (MOCK_MONGO)")
+    else:
+        app.state.chat_repo = MongoChatHistoryRepository()
+        logger.info("Using MongoChatHistoryRepository")
+
     logger.info("Palantiny server started")
     yield
     # Shutdown
@@ -31,6 +46,13 @@ async def lifespan(app: FastAPI):
         await worker_task
     except asyncio.CancelledError:
         pass
+    chat_repo = getattr(app.state, "chat_repo", None)
+    if chat_repo and hasattr(chat_repo, "close"):
+        close_fn = chat_repo.close
+        if asyncio.iscoroutinefunction(close_fn):
+            await close_fn()
+        else:
+            close_fn()
     await close_redis()
     await close_db()
     logger.info("Palantiny server stopped")

@@ -1,21 +1,17 @@
 """
 Chat Service - 채팅 로직, Redis Queue Producer, 스트리밍, ChatHistory 저장
-Agentic 라우팅 실행 → 데이터 수집 → LLM 최종 답변 스트리밍 → DB 저장.
+Agentic 라우팅 실행 → 데이터 수집 → LLM 최종 답변 스트리밍 → MongoDB 저장.
 """
 import asyncio
 import json
 import logging
-from typing import Any, AsyncGenerator
-from uuid import uuid4
+from typing import Any
 
 from redis.asyncio import Redis
-from sqlalchemy import select, desc
-from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
-from app.core.database import get_redis
-from app.models import ChatHistory
 from app.services.graph_service import search_herb_graph
+from app.services.history_manager import get_context_within_limit
 from app.services.llm_router import analyze_intent
 from app.services.sql_worker import SQL_RESULT_PREFIX, SQL_TASK_QUEUE
 from app.utils.prompts import (
@@ -128,21 +124,20 @@ async def _execute_sql_via_redis(message: str, redis: Redis) -> str:
     return json.dumps(data, ensure_ascii=False, indent=2)
 
 
-async def get_recent_history(db: AsyncSession, user_id: str, session_id: str, limit: int = 10) -> str:
-    """최근 대화를 문자열로 반환 (LLM 컨텍스트용)."""
-    result = await db.execute(
-        select(ChatHistory)
-        .where((ChatHistory.user_id == user_id) | (ChatHistory.session_id == session_id))
-        .order_by(desc(ChatHistory.created_at))
-        .limit(limit * 2)  # user+assistant 쌍
-    )
-    rows = result.scalars().all()
-    lines = [f"{r.role}: {r.content}" for r in reversed(rows)]
-    return "\n".join(lines) if lines else "(이전 대화 없음)"
+async def _get_herb_from_cache(redis: Redis, herb_name: str) -> str:
+    """Redis 캐시에서 한약재 데이터 조회. 캐시 미스 시 빈 문자열."""
+    try:
+        key = f"herb:cache:{herb_name}"
+        data = await redis.get(key)
+        if data:
+            return data
+    except Exception:
+        pass
+    return ""
 
 
 async def process_message(
-    db: AsyncSession,
+    chat_repo: Any,
     redis: Redis,
     session_id: str,
     user_id: str,
@@ -169,6 +164,16 @@ async def process_message(
     if route == "GRAPH":
         await send("status", "한약재 지식 그래프 탐색 중...")
         context = await search_herb_graph(message, extracted)
+    elif route == "CACHE":
+        await send("status", "CACHE에서 데이터 조회 중...")
+        herb_name = extracted.get("herb_name") or ""
+        for h in ["감초", "대추", "생강", "인삼"]:
+            if h in message:
+                herb_name = h
+                break
+        context = await _get_herb_from_cache(redis, herb_name)
+        if not context:
+            context = await search_herb_graph(message, extracted)
     elif route == "DB_SQL":
         await send("status", "DB 접근을 위한 Text-to-SQL 작업 중...")
         context = await _execute_sql_via_redis(message, redis)
@@ -176,7 +181,9 @@ async def process_message(
         await send("status", "이전 대화 맥락 확인 중...")
         context = ""
 
-    history_str = await get_recent_history(db, user_id, session_id)
+    history_str = await get_context_within_limit(
+        chat_repo, user_id, session_id, send_fn=send_fn
+    )
     user_content = FINAL_ANSWER_USER_TEMPLATE.format(
         context=context,
         history=history_str,
@@ -189,9 +196,6 @@ async def process_message(
     # 4. 종료 신호
     await send("end")
 
-    # 5. ChatHistory 저장
-    user_msg = ChatHistory(session_id=session_id, user_id=user_id, role="user", content=message)
-    assistant_msg = ChatHistory(session_id=session_id, user_id=user_id, role="assistant", content=full_response)
-    db.add(user_msg)
-    db.add(assistant_msg)
-    await db.commit()
+    # 5. ChatHistory 저장 (MongoDB)
+    await chat_repo.save(session_id, user_id, "user", message)
+    await chat_repo.save(session_id, user_id, "assistant", full_response)

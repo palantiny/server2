@@ -1,13 +1,16 @@
 """
-WebSocket 채팅 API: WS /api/v1/chat/{session_id}
-실시간 양방향 통신, Chat Service 연동.
+SSE 채팅 API
+POST /api/v1/chat/{session_id}/message: SSE 스트리밍 응답
+process_message와 Queue 연동으로 thinking 과정 실시간 전달.
 """
+import asyncio
 import json
 import logging
 
-from fastapi import APIRouter, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, HTTPException, Request
+from fastapi.responses import StreamingResponse
+from pydantic import BaseModel, Field
 
-from app.api.deps import get_db
 from app.core.database import get_redis
 from app.services.chat_service import process_message
 
@@ -16,61 +19,94 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/chat", tags=["chat"])
 
 
-@router.websocket("/{session_id}")
-async def websocket_chat(websocket: WebSocket, session_id: str):
-    """
-    WebSocket 채팅 엔드포인트.
-    클라이언트는 JSON {"message": "..."} 형태로 메시지 전송.
-    서버는 {"type": "status"|"token"|"end", "content": "..."} 형태로 응답.
-    """
-    await websocket.accept()
+class ChatMessageRequest(BaseModel):
+    """SSE 채팅 요청 Body."""
 
-    # user_id: auth/verify의 session_id가 {user_id}_{timestamp} 형태이므로 파싱 가능
-    # 또는 클라이언트가 메시지에 user_id 포함
+    message: str = Field(..., min_length=1, description="사용자 질문 내용")
+    user_id: str | None = Field(None, description="인증된 user_id (session_id에서 파싱 가능 시 생략)")
+
+
+def _sse_format(data: dict) -> str:
+    """SSE 표준 포맷: data: {JSON}\n\n"""
+    return f"data: {json.dumps(data, ensure_ascii=False)}\n\n"
+
+
+def _parse_user_id_from_session(session_id: str) -> str | None:
+    """session_id가 {user_id}_{timestamp} 형식이면 user_id 추출."""
     parts = session_id.rsplit("_", 1)
-    user_id = parts[0] if len(parts) == 2 and parts[1].isdigit() else None
+    if len(parts) == 2 and parts[1].isdigit():
+        return parts[0]
+    return None
+
+
+async def stream_chat_sse_real(
+    chat_repo,
+    redis,
+    session_id: str,
+    user_id: str,
+    message: str,
+):
+    """Queue 기반 SSE: process_message의 send_fn → queue → yield."""
+    queue: asyncio.Queue = asyncio.Queue()
+
+    async def send_fn(payload: dict):
+        await queue.put(payload)
+
+    async def run_process():
+        try:
+            await process_message(
+                chat_repo=chat_repo,
+                redis=redis,
+                session_id=session_id,
+                user_id=user_id,
+                message=message,
+                send_fn=send_fn,
+            )
+        finally:
+            await queue.put(None)
+
+    task = asyncio.create_task(run_process())
+    try:
+        while True:
+            item = await queue.get()
+            if item is None:
+                break
+            yield _sse_format(item)
+    except asyncio.CancelledError:
+        logger.info("SSE stream cancelled: session_id=%s", session_id)
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+    except Exception as e:
+        logger.exception("SSE stream error: %s", e)
+        task.cancel()
+        yield _sse_format({"type": "error", "content": str(e)})
+
+
+@router.post("/{session_id}/message")
+async def post_chat_message(session_id: str, body: ChatMessageRequest, request: Request):
+    """
+    POST /api/v1/chat/{session_id}/message
+    Body: {"message": "...", "user_id": "..."} (user_id는 session_id에서 파싱 가능 시 생략)
+    """
+    user_id = body.user_id or _parse_user_id_from_session(session_id)
+    if not user_id:
+        raise HTTPException(status_code=422, detail="user_id required (in body or session_id)")
+
+    chat_repo = getattr(request.app.state, "chat_repo", None)
+    if not chat_repo:
+        raise HTTPException(status_code=500, detail="chat_repo not initialized")
 
     redis = await get_redis()
 
-    try:
-        while True:
-            data = await websocket.receive_text()
-            try:
-                payload = json.loads(data)
-                msg = payload.get("message", "").strip()
-                uid = payload.get("user_id") or user_id
-                if not uid:
-                    await websocket.send_json({"type": "error", "content": "user_id is required (in message or session_id)"})
-                    continue
-                if not msg:
-                    await websocket.send_json({"type": "error", "content": "message is required"})
-                    continue
-
-                async def send_ws(p: dict):
-                    await websocket.send_json(p)
-
-                from app.core.database import async_session_maker
-
-                async with async_session_maker() as db:
-                    await process_message(
-                        db=db,
-                        redis=redis,
-                        session_id=session_id,
-                        user_id=uid,
-                        message=msg,
-                        send_fn=send_ws,
-                    )
-            except json.JSONDecodeError:
-                await websocket.send_json({"type": "error", "content": "Invalid JSON"})
-            except Exception as e:
-                logger.exception("Chat processing error: %s", e)
-                await websocket.send_json({"type": "error", "content": str(e)})
-    except WebSocketDisconnect:
-        logger.info("WebSocket disconnected: %s", session_id)
-    except Exception as e:
-        logger.exception("WebSocket error: %s", e)
-    finally:
-        try:
-            await websocket.close()
-        except Exception:
-            pass
+    return StreamingResponse(
+        stream_chat_sse_real(chat_repo, redis, session_id, user_id, body.message),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )

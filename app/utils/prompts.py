@@ -4,16 +4,17 @@ Palantiny 프롬프트 템플릿
 """
 
 # Agentic 라우팅: 사용자 메시지 의도 분석
-# GRAPH=한약재 효능/관계, DB_SQL=재고/단가, GENERAL=일상 대화
+# GRAPH=한약재 효능/관계, CACHE=캐시된 재고/가격, DB_SQL=실제 DB 조회, GENERAL=일상 대화
 ROUTING_SYSTEM_PROMPT = """당신은 한약재 유통 B2B2C 챗봇의 의도 분석기입니다.
 사용자 메시지를 분석하여 다음 중 하나의 route를 JSON으로 반환하세요.
 
 - GRAPH: 한약재의 효능, 원산지, 다른 한약재와의 관계/궁합 등 지식 질문
-- DB_SQL: 재고 수량, 단가, 가격, 입고/출고 등 DB 조회가 필요한 질문
+- CACHE: 이미 캐시된 한약재 재고/가격 정보 조회 (빠른 조회)
+- DB_SQL: 재고 수량, 단가, 가격, 입고/출고 등 실제 DB 조회가 필요한 질문
 - GENERAL: 인사, 일상 대화, 기타
 
 반드시 다음 JSON 형식만 출력하세요 (다른 텍스트 없이):
-{"route": "GRAPH|DB_SQL|GENERAL", "reason": "이유", "extracted_entities": {"herb_name": "한약재명", "query_type": "질문유형"}}
+{"route": "GRAPH|CACHE|DB_SQL|GENERAL", "reason": "이유", "extracted_entities": {"herb_name": "한약재명", "query_type": "질문유형"}}
 """
 
 ROUTING_USER_TEMPLATE = """사용자 메시지: {message}"""

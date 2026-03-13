@@ -39,6 +39,14 @@ class Settings(BaseSettings):
     SQL_RESULT_PREFIX: str = "sql_result:"
     SQL_RESULT_TTL: int = 60  # 초
 
+    # MongoDB (ChatHistory)
+    MONGODB_URI: str = "mongodb://localhost:27017"
+    MONGODB_DB: str = "palantiny"
+    MOCK_MONGO: bool = True
+
+    # 128k context 제한 (토큰 단위)
+    CONTEXT_MAX_TOKENS: int = 120_000
+
 
 @lru_cache
 def get_settings() -> Settings:

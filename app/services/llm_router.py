@@ -16,6 +16,7 @@ settings = get_settings()
 # Mock 모드에서 의도 기반 라우팅을 위한 키워드 매칭 (LLM 대체)
 MOCK_ROUTING_KEYWORDS = {
     "GRAPH": ["효능", "원산지", "관계", "궁합", "어떤", "무슨", "뭐", "감초", "대추", "인삼", "생강"],
+    "CACHE": ["캐시", "저장된", "기존"],
     "DB_SQL": ["재고", "단가", "가격", "수량", "얼마", "있어", "남아", "입고", "출고"],
 }
 
@@ -85,7 +86,7 @@ async def analyze_intent(message: str) -> dict[str, Any]:
         parsed = _parse_routing_json(text)
         if parsed and "route" in parsed:
             route = parsed["route"].upper()
-            if route not in ("GRAPH", "DB_SQL", "GENERAL"):
+            if route not in ("GRAPH", "CACHE", "DB_SQL", "GENERAL"):
                 route = "GENERAL"
             return {
                 "route": route,
