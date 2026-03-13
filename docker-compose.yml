@@ -1,0 +1,54 @@
+# Palantiny Chatbot Server - Docker Compose
+# Mac Mini 로컬 서버용 (AWS 미사용)
+
+services:
+  postgres:
+    image: postgres:15-alpine
+    container_name: palantiny_postgres
+    environment:
+      POSTGRES_USER: palantiny
+      POSTGRES_PASSWORD: palantiny_secret
+      POSTGRES_DB: palantiny_db
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U palantiny -d palantiny_db"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    container_name: palantiny_redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  app:
+    build: .
+    container_name: palantiny_app
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql+asyncpg://palantiny:palantiny_secret@postgres:5432/palantiny_db
+      REDIS_URL: redis://redis:6379/0
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      USE_MOCK_LLM: ${USE_MOCK_LLM:-true}
+    ports:
+      - "8000:8000"
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000
+
+volumes:
+  postgres_data:
+  redis_data:
