@@ -1,6 +1,7 @@
 """
 LLM 라우터 - 의도 분석 및 Agentic 라우팅
-사용자 메시지를 분석하여 GRAPH/DB_SQL/GENERAL 중 하나로 분기.
+사용자 메시지를 분석하여 GRAPH/DB_SQL/CACHE/GENERAL 라우트 배열로 분기.
+복합 질문은 여러 라우트를 동시에 반환하여 Fan-out 실행 지원.
 Mock 모드: API 키 없을 때 asyncio.sleep + 고정 응답으로 전환.
 """
 import asyncio
@@ -13,6 +14,8 @@ from app.utils.prompts import ROUTING_SYSTEM_PROMPT, ROUTING_USER_TEMPLATE
 
 settings = get_settings()
 
+VALID_ROUTES = {"GRAPH", "CACHE", "DB_SQL", "GENERAL"}
+
 # Mock 모드에서 의도 기반 라우팅을 위한 키워드 매칭 (LLM 대체)
 MOCK_ROUTING_KEYWORDS = {
     "GRAPH": ["효능", "원산지", "관계", "궁합", "어떤", "무슨", "뭐", "감초", "대추", "인삼", "생강"],
@@ -22,19 +25,18 @@ MOCK_ROUTING_KEYWORDS = {
 
 
 def _mock_route_by_keywords(message: str) -> dict[str, Any]:
-    """Mock: 키워드 기반 라우팅."""
+    """Mock: 키워드 기반 라우팅. 모든 매칭 라우트를 수집하여 배열 반환."""
     msg_lower = message.strip().lower()
+    matched_routes: list[str] = []
     for route, keywords in MOCK_ROUTING_KEYWORDS.items():
         if any(kw in message or kw in msg_lower for kw in keywords):
-            return {
-                "route": route,
-                "reason": f"Mock keyword match: {route}",
-                "extracted_entities": {"herb_name": _extract_herb_from_message(message)},
-            }
+            matched_routes.append(route)
+    if not matched_routes:
+        matched_routes = ["GENERAL"]
     return {
-        "route": "GENERAL",
-        "reason": "Mock default",
-        "extracted_entities": {},
+        "routes": matched_routes,
+        "reason": f"Mock keyword match: {', '.join(matched_routes)}",
+        "extracted_entities": {"herb_name": _extract_herb_from_message(message)},
     }
 
 
@@ -62,7 +64,7 @@ def _parse_routing_json(text: str) -> dict[str, Any] | None:
 async def analyze_intent(message: str) -> dict[str, Any]:
     """
     사용자 메시지 의도 분석.
-    반환: {"route": "GRAPH|DB_SQL|GENERAL", "reason": "...", "extracted_entities": {...}}
+    반환: {"routes": ["GRAPH", "DB_SQL", ...], "reason": "...", "extracted_entities": {...}}
     """
     # Mock 모드: API 키 없거나 USE_MOCK_LLM=True
     if settings.USE_MOCK_LLM or not settings.OPENAI_API_KEY:
@@ -84,15 +86,23 @@ async def analyze_intent(message: str) -> dict[str, Any]:
         )
         text = response.choices[0].message.content or ""
         parsed = _parse_routing_json(text)
-        if parsed and "route" in parsed:
-            route = parsed["route"].upper()
-            if route not in ("GRAPH", "CACHE", "DB_SQL", "GENERAL"):
-                route = "GENERAL"
-            return {
-                "route": route,
-                "reason": parsed.get("reason", ""),
-                "extracted_entities": parsed.get("extracted_entities", {}),
-            }
+        if parsed:
+            # 새 형식: "routes" 배열
+            if "routes" in parsed and isinstance(parsed["routes"], list):
+                routes = [r.upper() for r in parsed["routes"] if r.upper() in VALID_ROUTES]
+            # 레거시 호환: "route" 단일 문자열 → 배열로 래핑
+            elif "route" in parsed:
+                route = parsed["route"].upper()
+                routes = [route] if route in VALID_ROUTES else []
+            else:
+                routes = []
+
+            if routes:
+                return {
+                    "routes": routes,
+                    "reason": parsed.get("reason", ""),
+                    "extracted_entities": parsed.get("extracted_entities", {}),
+                }
     except Exception:
         pass
 

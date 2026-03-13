@@ -39,6 +39,10 @@ class Settings(BaseSettings):
     SQL_RESULT_PREFIX: str = "sql_result:"
     SQL_RESULT_TTL: int = 60  # 초
 
+    # Redis Queue/Pub/Sub 키 (Chat MQ 아키텍처용)
+    CHAT_TASK_QUEUE: str = "chat_task_queue"
+    CHAT_STREAM_PREFIX: str = "chat:stream:"
+
     # MongoDB (ChatHistory)
     MONGODB_URI: str = "mongodb://localhost:27017"
     MONGODB_DB: str = "palantiny"

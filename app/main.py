@@ -15,6 +15,7 @@ from app.repositories.chat_history_repository import (
     MemoryChatHistoryRepository,
     MongoChatHistoryRepository,
 )
+from app.services.chat_worker import run_chat_worker
 from app.services.sql_worker import run_sql_worker
 
 logging.basicConfig(level=logging.INFO)
@@ -28,7 +29,7 @@ async def lifespan(app: FastAPI):
     # Startup
     await init_db()
     redis = await get_redis()
-    worker_task = asyncio.create_task(run_sql_worker(redis))
+    sql_worker_task = asyncio.create_task(run_sql_worker(redis))
 
     # ChatHistory Repository (MongoDB 또는 Memory Mock)
     if settings.MOCK_MONGO:
@@ -38,14 +39,19 @@ async def lifespan(app: FastAPI):
         app.state.chat_repo = MongoChatHistoryRepository()
         logger.info("Using MongoChatHistoryRepository")
 
+    # Chat Worker (MQ Consumer → process_message → Pub/Sub)
+    chat_worker_task = asyncio.create_task(run_chat_worker(redis, app.state.chat_repo))
+
     logger.info("Palantiny server started")
     yield
     # Shutdown
-    worker_task.cancel()
-    try:
-        await worker_task
-    except asyncio.CancelledError:
-        pass
+    chat_worker_task.cancel()
+    sql_worker_task.cancel()
+    for task in [chat_worker_task, sql_worker_task]:
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
     chat_repo = getattr(app.state, "chat_repo", None)
     if chat_repo and hasattr(chat_repo, "close"):
         close_fn = chat_repo.close
