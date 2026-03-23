@@ -24,11 +24,8 @@ class Settings(BaseSettings):
     # Redis (Queue 및 Pub/Sub용)
     REDIS_URL: str = "redis://localhost:6379/0"
 
-    # OpenAI API (없거나 빈 값이면 Mock 모드로 자동 전환)
+    # OpenAI API
     OPENAI_API_KEY: str = ""
-
-    # Mock 모드 강제 사용 (개발/테스트 시 API 키 없이 동작)
-    USE_MOCK_LLM: bool = True
 
     # 앱 환경
     APP_ENV: Literal["development", "staging", "production"] = "development"
@@ -46,7 +43,12 @@ class Settings(BaseSettings):
     # MongoDB (ChatHistory)
     MONGODB_URI: str = "mongodb://localhost:27017"
     MONGODB_DB: str = "palantiny"
-    MOCK_MONGO: bool = True
+
+    # Neo4j (한약재 지식 그래프)
+    NEO4J_URI: str = "bolt://localhost:7687"
+    NEO4J_USERNAME: str = "neo4j"
+    NEO4J_PASSWORD: str = "palantiny_secret"
+    NEO4J_DATABASE: str = "neo4j"
 
     # 128k context 제한 (토큰 단위)
     CONTEXT_MAX_TOKENS: int = 120_000

@@ -1,94 +1,150 @@
 """
-한약재 지식 그래프 서비스 (Mock)
-실제 Ontology/Knowledge Graph 대신 Python 딕셔너리로 탐색 로직 구현.
-GRAPH 라우팅 시 한약재 효능, 관계, 원산지 등 조회.
+한약재 지식 그래프 서비스 (Neo4j)
 """
+import logging
 from typing import Any
 
-# 한약재 Ontology Mock 데이터
-# 실제 운영 시 Neo4j, RDF 등으로 대체 가능
-HERB_ONTOLOGY: dict[str, dict[str, Any]] = {
-    "감초": {
-        "efficacy": "보익기, 화해제독, 완급조제",
-        "related": ["대추", "생강", "인삼"],
-        "origin": "중국, 몽골",
-        "description": "맛이 달고 성질이 평하며, 기를 보하고 독을 풀어주며 약성의 완급을 조절합니다.",
-    },
-    "대추": {
-        "efficacy": "보혈안신, 건비위",
-        "related": ["감초", "인삼", "생강"],
-        "origin": "한국, 중국",
-        "description": "맛이 달고 성질이 따뜻하며, 혈을 보하고 신경을 안정시키며 비위를 튼튼하게 합니다.",
-    },
-    "생강": {
-        "efficacy": "온중산한, 지해구담",
-        "related": ["대추", "감초", "계피"],
-        "origin": "한국, 중국, 인도",
-        "description": "맛이 맵고 성질이 따뜻하며, 위를 따뜻하게 하고 한사를 제거합니다.",
-    },
-    "인삼": {
-        "efficacy": "대보원기, 보비익폐, 생진지갈",
-        "related": ["대추", "감초", "황기"],
-        "origin": "한국, 중국",
-        "description": "기운을 크게 보하고 비폐를 보하며 진액을 생기게 하고 갈증을 멈춥니다.",
-    },
-    "황기": {
-        "efficacy": "보기승양, 고표생진",
-        "related": ["인삼", "당귀"],
-        "origin": "중국, 몽골",
-        "description": "기를 보하고 양기를 올리며 표를 고하고 진액을 생기게 합니다.",
-    },
-    "당귀": {
-        "efficacy": "보혈활혈, 윤조장통",
-        "related": ["황기", "천궁", "백작"],
-        "origin": "중국, 한국",
-        "description": "혈을 보하고 혈행을 촉진하며 장부를 윤택하게 하고 통증을 완화합니다.",
-    },
-    "계피": {
-        "efficacy": "보화양원, 산한지통",
-        "related": ["생강", "부자"],
-        "origin": "베트남, 스리랑카",
-        "description": "양기를 보하고 원기를 돕으며 한사를 제거하고 통증을 멈춥니다.",
-    },
-}
+from neo4j import AsyncGraphDatabase
+
+from app.core.config import get_settings
+
+logger = logging.getLogger(__name__)
+settings = get_settings()
+
+# ── Neo4j 드라이버 (싱글톤) ──────────────────────────
+_driver = None
 
 
+async def get_neo4j_driver():
+    """Neo4j 비동기 드라이버 반환 (지연 초기화)."""
+    global _driver
+    if _driver is None and settings.NEO4J_URI:
+        _driver = AsyncGraphDatabase.driver(
+            settings.NEO4J_URI,
+            auth=(settings.NEO4J_USERNAME, settings.NEO4J_PASSWORD),
+        )
+    return _driver
+
+
+async def close_neo4j():
+    """Neo4j 드라이버 종료."""
+    global _driver
+    if _driver:
+        await _driver.close()
+        _driver = None
+
+
+# ── Neo4j 쿼리 ───────────────────────────────────────
+async def _query_neo4j(herb_name: str) -> str | None:
+    """Neo4j에서 약재 정보 + 관계 조회."""
+    driver = await get_neo4j_driver()
+    if not driver:
+        return None
+
+    try:
+        async with driver.session(database=settings.NEO4J_DATABASE) as session:
+            result = await session.run(
+                """
+                MATCH (h:Herb {name: $name})
+                OPTIONAL MATCH (h)-[:RELATED_TO]-(related:Herb)
+                OPTIONAL MATCH (h)-[:ORIGINATES_FROM]->(o:Origin)
+                RETURN h.name AS name,
+                       h.efficacy AS efficacy,
+                       h.description AS description,
+                       h.nature AS nature,
+                       h.flavor AS flavor,
+                       COLLECT(DISTINCT related.name) AS related_herbs,
+                       COLLECT(DISTINCT o.name) AS origins
+                """,
+                name=herb_name,
+            )
+            record = await result.single()
+
+            if not record or not record["name"]:
+                return None
+
+            lines = [f"한약재: {record['name']}"]
+            if record["efficacy"]:
+                lines.append(f"효능: {record['efficacy']}")
+            if record["nature"]:
+                lines.append(f"성질: {record['nature']}")
+            if record["flavor"]:
+                lines.append(f"맛: {record['flavor']}")
+            origins = [o for o in record["origins"] if o]
+            if origins:
+                lines.append(f"원산지: {', '.join(origins)}")
+            if record["description"]:
+                lines.append(f"설명: {record['description']}")
+            related = [r for r in record["related_herbs"] if r]
+            if related:
+                lines.append(f"관련 한약재: {', '.join(related)}")
+            return "\n".join(lines)
+    except Exception as e:
+        logger.exception("Neo4j 쿼리 실패: %s", e)
+        return None
+
+
+async def _search_neo4j_all(query: str) -> str | None:
+    """Neo4j에서 query에 포함된 약재 또는 전체 목록 조회."""
+    driver = await get_neo4j_driver()
+    if not driver:
+        return None
+
+    try:
+        async with driver.session(database=settings.NEO4J_DATABASE) as session:
+            # 전체 약재 중 이름에 query 키워드가 포함된 것 검색
+            result = await session.run(
+                """
+                MATCH (h:Herb)
+                WHERE h.name CONTAINS $keyword
+                OPTIONAL MATCH (h)-[:ORIGINATES_FROM]->(o:Origin)
+                RETURN h.name AS name, h.efficacy AS efficacy,
+                       COLLECT(DISTINCT o.name) AS origins
+                LIMIT 10
+                """,
+                keyword=query,
+            )
+            records = [r async for r in result]
+
+            if not records:
+                # 전체 약재 목록 반환
+                result = await session.run(
+                    "MATCH (h:Herb) RETURN h.name AS name ORDER BY h.name LIMIT 50"
+                )
+                names = [r["name"] async for r in result]
+                if names:
+                    return f"등록된 한약재: {', '.join(names)}. 특정 한약재 이름을 말씀해 주시면 자세히 안내해 드리겠습니다."
+                return None
+
+            lines = []
+            for r in records:
+                origins = [o for o in r["origins"] if o]
+                origin_str = f", 원산지={', '.join(origins)}" if origins else ""
+                lines.append(f"{r['name']}: 효능={r['efficacy']}{origin_str}")
+            return "\n".join(lines)
+    except Exception as e:
+        logger.exception("Neo4j 전체 검색 실패: %s", e)
+        return None
+
+
+# ── 외부 인터페이스 ──────────────────────────────────
 async def search_herb_graph(query: str, extracted_entities: dict[str, Any] | None = None) -> str:
     """
-    한약재 지식 그래프 Mock 탐색.
-    query와 extracted_entities의 herb_name으로 관련 정보 반환.
+    한약재 지식 그래프 탐색 (Neo4j).
     """
     herb_name = None
     if extracted_entities and extracted_entities.get("herb_name"):
         herb_name = extracted_entities["herb_name"]
 
-    # herb_name이 없으면 query에서 한약재명 추출 시도
-    if not herb_name:
-        for name in HERB_ONTOLOGY:
-            if name in query:
-                herb_name = name
-                break
+    # Neo4j 조회
+    if herb_name:
+        neo4j_result = await _query_neo4j(herb_name)
+        if neo4j_result:
+            return neo4j_result
+        return f"'{herb_name}'에 대한 지식 그래프 정보가 없습니다."
 
-    if herb_name and herb_name in HERB_ONTOLOGY:
-        data = HERB_ONTOLOGY[herb_name]
-        lines = [
-            f"한약재: {herb_name}",
-            f"효능: {data['efficacy']}",
-            f"원산지: {data['origin']}",
-            f"설명: {data['description']}",
-            f"관련 한약재: {', '.join(data['related'])}",
-        ]
-        return "\n".join(lines)
+    neo4j_result = await _search_neo4j_all(query)
+    if neo4j_result:
+        return neo4j_result
 
-    # 여러 한약재 검색 (query에 포함된 모든 한약재)
-    results = []
-    for name in HERB_ONTOLOGY:
-        if name in query:
-            data = HERB_ONTOLOGY[name]
-            results.append(f"{name}: 효능={data['efficacy']}, 원산지={data['origin']}")
-
-    if results:
-        return "\n".join(results)
-
-    # 매칭 없으면 전체 목록 요약
-    return "등록된 한약재: " + ", ".join(HERB_ONTOLOGY.keys()) + ". 특정 한약재 이름을 말씀해 주시면 자세히 안내해 드리겠습니다."
+    return "지식 그래프에서 관련 정보를 찾지 못했습니다. 특정 한약재 이름을 말씀해 주시면 자세히 안내해 드리겠습니다."

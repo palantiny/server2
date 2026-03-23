@@ -199,6 +199,7 @@
     <div class="login-screen" id="loginScreen">
         <h1>Palantiny</h1>
         <p style="color: var(--text-muted); margin-bottom: 20px;">한약재 B2B 챗봇 테스트 패널</p>
+        <input type="text" id="serverAddress" placeholder="서버 주소 (예: 192.168.0.10:8000)" value="">
         <input type="text" id="partnerToken" placeholder="Partner Token" value="partner_demo_token_001">
         <button id="loginBtn">연결하기</button>
         <div class="login-error" id="loginError"></div>
@@ -227,7 +228,7 @@
 </div>
 
 <script>
-    const API_URL = "http://localhost:8000/api/v1";
+    let API_URL = "";
     let currentSessionId = "";
     let currentUser = "";
     let eventSource = null;
@@ -235,6 +236,7 @@
 
     // DOM Elements
     const loginScreen = document.getElementById('loginScreen');
+    const serverAddressInput = document.getElementById('serverAddress');
     const partnerTokenInput = document.getElementById('partnerToken');
     const loginBtn = document.getElementById('loginBtn');
     const loginError = document.getElementById('loginError');
@@ -243,10 +245,31 @@
     const sendBtn = document.getElementById('sendBtn');
     const connectionStatus = document.getElementById('connectionStatus');
 
+    // 서버 주소 자동 채우기 (localStorage 또는 현재 호스트 기반)
+    (function initServerAddress() {
+        const saved = localStorage.getItem('palantiny_server');
+        if (saved) {
+            serverAddressInput.value = saved;
+        } else if (location.hostname === 'localhost' || location.hostname === '127.0.0.1') {
+            serverAddressInput.value = 'localhost:8000';
+        } else {
+            serverAddressInput.value = location.hostname + ':8000';
+        }
+    })();
+
     // Login Logic
     loginBtn.addEventListener('click', async () => {
+        const serverAddr = serverAddressInput.value.trim();
         const token = partnerTokenInput.value.trim();
-        if(!token) return;
+        if(!serverAddr || !token) {
+            loginError.textContent = "서버 주소와 토큰을 모두 입력하세요.";
+            return;
+        }
+
+        // http:// 자동 추가
+        const base = serverAddr.startsWith('http') ? serverAddr : `http://${serverAddr}`;
+        API_URL = `${base}/api/v1`;
+        localStorage.setItem('palantiny_server', serverAddr);
         
         loginBtn.disabled = true;
         loginBtn.textContent = "연결 중...";
