@@ -12,7 +12,6 @@ from app.api.v1 import auth, cache, chat
 from app.core.config import get_settings
 from app.core.database import close_db, close_redis, get_redis, init_db
 from app.repositories.chat_history_repository import MongoChatHistoryRepository
-from app.services.cache_service import warm_cache
 from app.services.graph_service import close_neo4j
 
 logging.basicConfig(level=logging.INFO)
@@ -26,13 +25,6 @@ async def lifespan(app: FastAPI):
     # Startup
     await init_db()
     redis = await get_redis()
-
-    # Cache Warming: RDBMS → Redis 사전 적재
-    try:
-        cached = await warm_cache()
-        logger.info("Cache warming 완료: %d개 약재", cached)
-    except Exception as e:
-        logger.warning("Cache warming 실패 (서버는 계속 구동): %s", e)
 
     # ChatHistory Repository (MongoDB)
     app.state.chat_repo = MongoChatHistoryRepository()
