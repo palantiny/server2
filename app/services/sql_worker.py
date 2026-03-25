@@ -6,6 +6,7 @@ RDBMS에서 SQL 실행 후 결과를 result_key에 RPUSH.
 import asyncio
 import json
 import logging
+import uuid
 from typing import Any
 
 from redis.asyncio import Redis
@@ -51,16 +52,19 @@ async def execute_sql_task(redis: Redis, task_payload: dict[str, Any]) -> None:
             result = await session.execute(text(sql))
             rows = result.mappings().all()
             data = [dict(r) for r in rows]
-            # datetime 등 JSON 직렬화를 위해 str 변환
             for row in data:
                 for k, v in row.items():
-                    if hasattr(v, "isoformat"):
+                    if isinstance(v, uuid.UUID):
+                        row[k] = str(v)
+                    elif hasattr(v, "isoformat"):
                         row[k] = v.isoformat()
                     elif hasattr(v, "__float__") and not isinstance(v, (int, float, bool)):
                         try:
                             row[k] = float(v)
                         except (TypeError, ValueError):
                             row[k] = str(v)
+                    elif not isinstance(v, (int, float, str, bool, type(None))):
+                        row[k] = str(v)
 
             await redis.rpush(result_key, json.dumps(data, ensure_ascii=False))
             await redis.expire(result_key, SQL_RESULT_TTL)

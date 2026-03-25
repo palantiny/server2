@@ -23,3 +23,10 @@ motor>=3.3.0
 
 # 토큰 카운트 (128k context 관리)
 tiktoken>=0.5.0
+
+# LangGraph (3단계 순차 파이프라인)
+langgraph>=0.2.0
+langchain-core>=0.3.0
+
+# Neo4j (한약재 지식 그래프)
+neo4j>=5.0.0

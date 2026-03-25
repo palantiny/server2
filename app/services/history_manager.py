@@ -29,9 +29,6 @@ def _count_tokens(text: str) -> int:
 
 async def _summarize_with_llm(text: str) -> str:
     """LLM으로 텍스트 요약."""
-    if settings.USE_MOCK_LLM or not settings.OPENAI_API_KEY:
-        return text[:500] + "..." if len(text) > 500 else text
-
     try:
         from openai import AsyncOpenAI
 

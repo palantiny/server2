@@ -72,32 +72,3 @@ class MongoChatHistoryRepository:
             self._db = None
 
 
-class MemoryChatHistoryRepository:
-    """메모리 기반 Mock 저장소 (MongoDB 없이 동작)."""
-
-    def __init__(self):
-        self._store: list[dict] = []
-
-    async def get_recent(self, user_id: str, session_id: str, limit: int = 20) -> list[dict]:
-        filtered = [
-            r
-            for r in self._store
-            if r.get("user_id") == user_id or r.get("session_id") == session_id
-        ]
-        filtered.sort(key=lambda x: x["created_at"])
-        recent = filtered[-limit:] if len(filtered) > limit else filtered
-        return [
-            {"role": r["role"], "content": r["content"], "created_at": r["created_at"].isoformat()}
-            for r in recent
-        ]
-
-    async def save(self, session_id: str, user_id: str, role: str, content: str) -> None:
-        self._store.append(
-            {
-                "session_id": session_id,
-                "user_id": user_id,
-                "role": role,
-                "content": content,
-                "created_at": datetime.utcnow(),
-            }
-        )

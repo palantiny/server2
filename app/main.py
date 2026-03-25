@@ -8,15 +8,11 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.api.v1 import auth, chat
+from app.api.v1 import auth, cache, chat
 from app.core.config import get_settings
 from app.core.database import close_db, close_redis, get_redis, init_db
-from app.repositories.chat_history_repository import (
-    MemoryChatHistoryRepository,
-    MongoChatHistoryRepository,
-)
-from app.services.chat_worker import run_chat_worker
-from app.services.sql_worker import run_sql_worker
+from app.repositories.chat_history_repository import MongoChatHistoryRepository
+from app.services.graph_service import close_neo4j
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -25,33 +21,18 @@ settings = get_settings()
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """앱 시작 시 DB/Redis/MongoDB 초기화, SQL Worker, chat_repo 설정. 종료 시 정리."""
+    """앱 시작 시 DB/Redis/MongoDB 초기화, chat_repo 설정. 종료 시 정리."""
     # Startup
     await init_db()
     redis = await get_redis()
-    sql_worker_task = asyncio.create_task(run_sql_worker(redis))
 
-    # ChatHistory Repository (MongoDB 또는 Memory Mock)
-    if settings.MOCK_MONGO:
-        app.state.chat_repo = MemoryChatHistoryRepository()
-        logger.info("Using MemoryChatHistoryRepository (MOCK_MONGO)")
-    else:
-        app.state.chat_repo = MongoChatHistoryRepository()
-        logger.info("Using MongoChatHistoryRepository")
-
-    # Chat Worker (MQ Consumer → process_message → Pub/Sub)
-    chat_worker_task = asyncio.create_task(run_chat_worker(redis, app.state.chat_repo))
+    # ChatHistory Repository (MongoDB)
+    app.state.chat_repo = MongoChatHistoryRepository()
+    logger.info("Using MongoChatHistoryRepository")
 
     logger.info("Palantiny server started")
     yield
     # Shutdown
-    chat_worker_task.cancel()
-    sql_worker_task.cancel()
-    for task in [chat_worker_task, sql_worker_task]:
-        try:
-            await task
-        except asyncio.CancelledError:
-            pass
     chat_repo = getattr(app.state, "chat_repo", None)
     if chat_repo and hasattr(chat_repo, "close"):
         close_fn = chat_repo.close
@@ -59,6 +40,7 @@ async def lifespan(app: FastAPI):
             await close_fn()
         else:
             close_fn()
+    await close_neo4j()
     await close_redis()
     await close_db()
     logger.info("Palantiny server stopped")
@@ -81,6 +63,7 @@ app.add_middleware(
 
 # API v1 라우터
 app.include_router(auth.router, prefix="/api/v1")
+app.include_router(cache.router, prefix="/api/v1")
 app.include_router(chat.router, prefix="/api/v1")
 
 
