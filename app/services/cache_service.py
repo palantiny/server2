@@ -25,12 +25,10 @@ CACHE_THRESHOLD = 2  # 이 횟수 이상 접근 시 캐시 적재
 
 # ── 내부 유틸 ─────────────────────────────────────────
 def _cache_key(herb_name: str) -> str:
-    """약재명 기반 캐시 키 생성."""
     return f"{CACHE_PREFIX}{herb_name}"
 
 
 def _access_key(herb_name: str) -> str:
-    """약재명 기반 접근 카운터 키 생성."""
     return f"{ACCESS_COUNT_PREFIX}{herb_name}"
 
 
@@ -114,10 +112,7 @@ async def get_herbs_bulk(herb_names: list[str]) -> dict[str, dict | None]:
 
 # ── 2) Cache Invalidation ────────────────────────────
 async def invalidate_herb_cache(herb_name: str) -> bool:
-    """
-    원본 데이터 변경 시 해당 약재의 캐시 + 접근 카운터를 삭제.
-    다음 조회 시 Cache Miss → 접근 카운터 1부터 다시 시작.
-    """
+    """캐시 + 접근 카운터 삭제."""
     redis = await get_redis()
     key = _cache_key(herb_name)
     access_key = _access_key(herb_name)
@@ -163,105 +158,120 @@ async def invalidate_all_herb_cache() -> int:
 async def _fetch_herb_from_db(herb_name: str) -> dict | None:
     """
     DB에서 약재 관련 전체 정보를 조회하여 캐시 value 형태의 dict로 반환.
-    herb_master(기본 정보) + herb_price_item(가격) + inventory(재고) + herb_price_history(가격 이력)
+    - han_medicine: 약재 마스터 (효능, 원산지, 설명, 가격 등)
+    - han_medicine_dj: 시설별 약재 상세 (성미, 귀경, 가격)
+    - price_item: 가격표 (국산/수입)
+    - price_history: 월별 가격 이력
+    - han_warehouse: 재고 입출고 이력
     """
     async with async_session_maker() as session:
-        # herb_master 기본 정보
-        master_result = await session.execute(text("""
-            SELECT herb_id, name, origin, efficacy
-            FROM herb_master
-            WHERE name = :name
-        """), {"name": herb_name})
-        master_rows = master_result.fetchall()
+        # han_medicine — 약재 마스터
+        med_result = await session.execute(text("""
+            SELECT md_seq, md_code, md_title_kor, md_title_chn, md_title_eng,
+                   md_origin_kor, md_desc_kor, md_feature_kor, md_note_kor,
+                   md_interact_kor, md_relate_kor, md_property_kor,
+                   md_price, md_qty, md_status
+            FROM han_medicine
+            WHERE md_title_kor LIKE :pattern
+        """), {"pattern": f"%{herb_name}%"})
+        med_rows = med_result.fetchall()
 
-        # herb_price_item 가격 정보
+        # han_medicine_dj — 시설별 약재 상세
+        dj_result = await session.execute(text("""
+            SELECT mm_title_kor, mm_origin_kor, mm_state, mm_taste, mm_object,
+                   mm_feature, mm_alias, mm_desc, mm_caution,
+                   mm_price, mm_qty, mm_status
+            FROM han_medicine_dj
+            WHERE mm_title_kor LIKE :pattern
+        """), {"pattern": f"%{herb_name}%"})
+        dj_rows = dj_result.fetchall()
+
+        # price_item — 가격표
         price_result = await session.execute(text("""
-            SELECT
-                code, herb_name, origin, grade, source_type,
-                price_per_geun, packaging_unit_g, packaging_unit_price, box_quantity,
-                subscription_price, subscription_unit_g, subscription_unit_price,
-                subscription_box_qty, manufacturer, note, discount_rate
-            FROM herb_price_item
-            WHERE herb_name = :name
-        """), {"name": herb_name})
+            SELECT code, herb_name, origin, grade, source_type,
+                   price_per_geun, packaging_unit_g, packaging_unit_price,
+                   box_quantity, subscription_price, manufacturer, note
+            FROM price_item
+            WHERE herb_name LIKE :pattern
+        """), {"pattern": f"%{herb_name}%"})
         price_rows = price_result.fetchall()
 
-        # inventory + herb_master 재고 정보
-        inv_result = await session.execute(text("""
-            SELECT
-                hm.name, hm.origin, hm.efficacy,
-                inv.partner_id, inv.stock_quantity, inv.price
-            FROM inventory inv
-            JOIN herb_master hm ON hm.herb_id = inv.herb_id
-            WHERE hm.name = :name
-        """), {"name": herb_name})
-        inv_rows = inv_result.fetchall()
-
-        # herb_price_history 가격 이력
+        # price_history — 월별 가격 이력
         history_result = await session.execute(text("""
-            SELECT
-                h.year_month, h.regular_price, h.subscription_price,
-                i.herb_name, i.code
-            FROM herb_price_history h
-            JOIN herb_price_item i ON i.id = h.item_id
-            WHERE i.herb_name = :name
-            ORDER BY h.year_month DESC
-        """), {"name": herb_name})
+            SELECT code, herb_name, source_type, year_month,
+                   regular_price, subscription_price
+            FROM price_history
+            WHERE herb_name LIKE :pattern
+            ORDER BY year_month DESC
+        """), {"pattern": f"%{herb_name}%"})
         history_rows = history_result.fetchall()
 
-    if not master_rows and not price_rows and not inv_rows:
+        # han_warehouse — 재고/입출고
+        wh_result = await session.execute(text("""
+            SELECT wh_title, wh_type, wh_qty, wh_remain, wh_price,
+                   wh_origin, wh_maker, wh_date, wh_status
+            FROM han_warehouse
+            WHERE wh_title LIKE :pattern
+        """), {"pattern": f"%{herb_name}%"})
+        wh_rows = wh_result.fetchall()
+
+    if not med_rows and not dj_rows and not price_rows and not wh_rows:
         return None
 
     data: dict[str, Any] = {
         "herb_name": herb_name,
-        "master": [],
+        "medicine": [],
+        "medicine_dj": [],
         "price_items": [],
-        "inventory": [],
         "price_history": [],
+        "warehouse": [],
     }
 
-    for row in master_rows:
-        data["master"].append({
-            "herb_id": str(row[0]),
-            "name": row[1],
-            "origin": row[2],
-            "efficacy": row[3],
+    for row in med_rows:
+        data["medicine"].append({
+            "md_seq": row[0], "md_code": row[1],
+            "name_kor": row[2], "name_chn": row[3], "name_eng": row[4],
+            "origin": row[5], "description": row[6],
+            "feature": row[7], "note": row[8],
+            "interaction": row[9], "related": row[10], "property": row[11],
+            "price": float(row[12]) if row[12] else None,
+            "stock_qty": row[13], "status": row[14],
+        })
+
+    for row in dj_rows:
+        data["medicine_dj"].append({
+            "name_kor": row[0], "origin": row[1],
+            "nature": row[2], "taste": row[3], "meridian": row[4],
+            "feature": row[5], "alias": row[6],
+            "description": row[7], "caution": row[8],
+            "price": float(row[9]) if row[9] else None,
+            "stock_qty": row[10], "status": row[11],
         })
 
     for row in price_rows:
         data["price_items"].append({
-            "code": row[0],
-            "origin": row[2],
-            "grade": row[3],
-            "source_type": row[4],
-            "price_per_geun": float(row[5]) if row[5] is not None else None,
-            "packaging_unit_g": row[6],
-            "packaging_unit_price": float(row[7]) if row[7] is not None else None,
-            "box_quantity": row[8],
-            "subscription_price": float(row[9]) if row[9] is not None else None,
-            "subscription_unit_g": row[10],
-            "subscription_unit_price": float(row[11]) if row[11] is not None else None,
-            "subscription_box_qty": row[12],
-            "manufacturer": row[13],
-            "note": row[14],
-            "discount_rate": row[15],
-        })
-
-    for row in inv_rows:
-        data["inventory"].append({
-            "origin": row[1],
-            "efficacy": row[2],
-            "partner_id": row[3],
-            "stock_quantity": row[4],
-            "price": float(row[5]) if row[5] is not None else None,
+            "code": row[0], "herb_name": row[1], "origin": row[2],
+            "grade": row[3], "source_type": row[4],
+            "price_per_geun": row[5],
+            "packaging_unit_g": row[6], "packaging_unit_price": row[7],
+            "box_quantity": row[8], "subscription_price": row[9],
+            "manufacturer": row[10], "note": row[11],
         })
 
     for row in history_rows:
         data["price_history"].append({
-            "year_month": row[0],
-            "regular_price": float(row[1]) if row[1] is not None else None,
-            "subscription_price": float(row[2]) if row[2] is not None else None,
-            "code": row[4],
+            "code": row[0], "herb_name": row[1], "source_type": row[2],
+            "year_month": row[3],
+            "regular_price": row[4], "subscription_price": row[5],
+        })
+
+    for row in wh_rows:
+        data["warehouse"].append({
+            "title": row[0], "type": row[1],
+            "qty": row[2], "remain": row[3],
+            "price": float(row[4]) if row[4] else None,
+            "origin": row[5], "maker": row[6],
+            "date": row[7], "status": row[8],
         })
 
     return data
