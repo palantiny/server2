@@ -1,4 +1,7 @@
-"""PDF에서 텍스트 추출 → 같은 이름의 .txt로 저장."""
+"""PDF에서 텍스트 추출 → 같은 이름의 .txt로 저장.
+
+단일 파일용. 1~7권 일괄 처리는 scripts/prepare_monograph.py 를 사용하세요.
+"""
 import sys
 from pathlib import Path
 
