@@ -68,6 +68,17 @@ services:
       timeout: 10s
       retries: 10
 
+  neo4j-seeder:
+    image: neo4j:5-community
+    container_name: palantiny_neo4j_seeder
+    depends_on:
+      neo4j:
+        condition: service_healthy
+    volumes:
+      - ./init_data.cypher:/scripts/init_data.cypher 
+    command: >
+      cypher-shell -a neo4j://palantiny_neo4j:7687 -u neo4j -p palantiny_secret -f /scripts/init_data.cypher
+
   app:
     build: .
     container_name: palantiny_app

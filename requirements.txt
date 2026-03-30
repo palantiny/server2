@@ -15,8 +15,11 @@ redis>=5.0.0
 pydantic-settings>=2.1.0
 python-dotenv>=1.0.0
 
-# LLM API (OpenAI, Mock 모드 대비)
-openai>=1.12.0
+# CSV → Cypher (scripts/herb_prices_to_cypher.py)
+pandas>=2.0.0
+
+# LLM API (OpenAI, Mock 모드 대비; o1 등은 max_completion_tokens 필요)
+openai>=1.40.0
 
 # MongoDB (비동기)
 motor>=3.3.0
@@ -30,3 +33,6 @@ langchain-core>=0.3.0
 
 # Neo4j (한약재 지식 그래프)
 neo4j>=5.0.0
+
+# PDF 텍스트 추출 (모노그래프 전처리)
+pypdf>=4.0.0
